@@ -1,0 +1,10 @@
+To get this to compile, there are a few things that need configuring in the libraries after they are copied in.
+
+For `lvgl` we need to copy `lv_conf_template.h` into the root of the library folder (on my system it is `.pio/libdeps`) and rename it to `lv_conf.h` otherwise the lvgl library won't compile at all.
+
+You also need to configure a few things in it:
+
+- Search for `#if 0 /*Set it to "1" to enable content*/` and set it to 1 (e.g. `#if 1 /*Set it to "1" to enable content*/`)
+- Search for `LV_USE_TFT_ESPI` and set that to 1. This tells lvgl to use the TFT_eSPI library/driver.
+
+Next, for the `TFT_eSPI` library, we need to copy our local `TFT_eSPI/Setup*.h` file into the `User_Setups` directory (`.pio/libdeps/*/TFT_eSPI`) and then, in `User_Setup_Select.h` edit the file to point at the copy of our setup file. (e.g. `#include <User_Setups/Setup_Crowpanel_2-4_ESP32.h> // Setup file for Elecrow Crowpanel 2.4" ESP32`. Make sure to comment out the default `// #include <User_Setup.h>           // Default setup is root library folder` or whatever else is enabled as there can be only one.)
