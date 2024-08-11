@@ -133,6 +133,7 @@ void setup()
 
   Serial.println("Setting up TFT_eSPI driver");
   disp = lv_tft_espi_create(TFT_WIDTH, TFT_HEIGHT, draw_buf, sizeof(draw_buf));
+  lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90); // Rotate display
 
   /*Initialize the (dummy) input device driver*/
   lv_indev_t *indev = lv_indev_create();
