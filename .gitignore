@@ -32,3 +32,6 @@
 *.app
 .pio
 .vscode
+
+# MacOS system files
+.DS_Store
