@@ -1,9 +1,0 @@
-The `Setup*.h` files in this directory are used to define the display for the `TFT_eSPI` library.
-
-The library does the display config and setup using this file.
-
-It should be copied into `.pio/libdeps/*/TFT_eSPI/User_Setups/` and in the root of the `TFT_eSPI` library, edit `User_Setup_Select.h` to point to the config file you copied in.
-
-**Note:** This config came from https://www.elecrow.com/wiki/esp32-display-242727-intelligent-touch-screen-wi-fi26ble-240320-hmi-display.html
-
-We may end up with multiple files but for now, this is for the 2.4" ESP32 version.

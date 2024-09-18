@@ -1,0 +1,24 @@
+{
+    "theme" : {
+        "mode" : "dark",
+        "colour" : "BLUE_GREY"                                        
+    },
+    "wifi" : {
+        "wifiMode" : "AP",
+        "AP" : {
+            "ssid" : "tpController",
+            "passphrase" : "12345678",
+            "IP" : "192.168.5.1",
+            "netmask" : "255.255.255.0",
+            "gateway" : "192.168.9.1"
+        },
+        "Client" : {
+            "ssid" : "",
+            "passphrase" : "",
+            "IPAutoConfig" : false,
+            "IP" : "",
+            "netmask" : "",
+            "gateway" : ""
+        }
+    }
+}

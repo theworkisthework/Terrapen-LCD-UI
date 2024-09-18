@@ -1,151 +1,231 @@
-/*Using LVGL with Arduino requires some extra steps:
- *Be sure to read the docs here: https://docs.lvgl.io/master/get-started/platforms/arduino.html  */
-#include <Arduino.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
 #include <lvgl.h>
+#include <LovyanGFX.hpp>
+#include <lgfx/v1/platforms/esp32s3/Panel_RGB.hpp>
+#include <lgfx/v1/platforms/esp32s3/Bus_RGB.hpp>
+#include <Wire.h>
+#include <TAMC_GT911.h>
+#include "terrapen.h"
+#include "TPConfiguration.hpp"
 
-#if LV_USE_TFT_ESPI
-#include <TFT_eSPI.h>
-#endif
+#define TFT_BL 2
 
-/*LVGL draw into this buffer, 1/10 screen size usually works well. The size is in bytes*/
-#define DRAW_BUF_SIZE (TFT_WIDTH * TFT_HEIGHT / 10 * (LV_COLOR_DEPTH / 8))
-uint32_t draw_buf[DRAW_BUF_SIZE / 4];
+static const uint16_t screenWidth = TFT_HOR_RES;
+static const uint16_t screenHeight = TFT_VER_RES;
+const unsigned long lvBufferSize = screenWidth * screenHeight / 10 * (LV_COLOR_DEPTH / 8);
+uint8_t *lvBuffer;
 
-static uint32_t convert_millis_to_tick(void)
+const char *ssid = "tp_controller";
+const char *password = "12345678";
+
+unsigned long lastTickMillis = 0;
+
+class LGFX : public lgfx::LGFX_Device
 {
-  return millis();
-}
+public:
+  lgfx::Bus_RGB _bus_instance;
+  lgfx::Panel_RGB _panel_instance;
 
-/*Read the touchpad*/
-void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
-{
-  Serial.println("Screen touched");
-  /*For example  ("my_..." functions needs to be implemented by you)
-  int32_t x, y;
-  bool touched = my_get_touch( &x, &y );
-
-  if(!touched) {
-      data->state = LV_INDEV_STATE_RELEASED;
-  } else {
-      data->state = LV_INDEV_STATE_PRESSED;
-
-      data->point.x = x;
-      data->point.y = y;
-  }
-   */
-}
-
-int btn1_count = 0;
-// Callback that is triggered when btn1 is clicked
-static void event_handler_btn1(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_CLICKED)
+  LGFX(void)
   {
-    btn1_count++;
-    LV_LOG_USER("Button clicked %d", (int)btn1_count);
-  }
-}
 
-// Callback that is triggered when btn2 is clicked/toggled
-static void event_handler_btn2(lv_event_t *e)
+    {
+      auto cfg = _bus_instance.config();
+      cfg.panel = &_panel_instance;
+
+      cfg.pin_d0 = GPIO_NUM_8;  // B0
+      cfg.pin_d1 = GPIO_NUM_3;  // B1
+      cfg.pin_d2 = GPIO_NUM_46; // B2
+      cfg.pin_d3 = GPIO_NUM_9;  // B3
+      cfg.pin_d4 = GPIO_NUM_1;  // B4
+
+      cfg.pin_d5 = GPIO_NUM_5;  // G0
+      cfg.pin_d6 = GPIO_NUM_6;  // G1
+      cfg.pin_d7 = GPIO_NUM_7;  // G2
+      cfg.pin_d8 = GPIO_NUM_15; // G3
+      cfg.pin_d9 = GPIO_NUM_16; // G4
+      cfg.pin_d10 = GPIO_NUM_4; // G5
+
+      cfg.pin_d11 = GPIO_NUM_45; // R0
+      cfg.pin_d12 = GPIO_NUM_48; // R1
+      cfg.pin_d13 = GPIO_NUM_47; // R2
+      cfg.pin_d14 = GPIO_NUM_21; // R3
+      cfg.pin_d15 = GPIO_NUM_14; // R4
+      cfg.pin_henable = GPIO_NUM_40;
+      cfg.pin_vsync = GPIO_NUM_41;
+      cfg.pin_hsync = GPIO_NUM_39;
+      cfg.pin_pclk = GPIO_NUM_0;
+      cfg.freq_write = 15000000;
+
+      cfg.hsync_polarity = 0;
+      cfg.hsync_front_porch = 8;
+      cfg.hsync_pulse_width = 4;
+      cfg.hsync_back_porch = 43;
+
+      cfg.vsync_polarity = 0;
+      cfg.vsync_front_porch = 8;
+      cfg.vsync_pulse_width = 4;
+      cfg.vsync_back_porch = 12;
+
+      cfg.pclk_active_neg = 1;
+      cfg.de_idle_high = 0;
+      cfg.pclk_idle_high = 0;
+
+      _bus_instance.config(cfg);
+    }
+    {
+      auto cfg = _panel_instance.config();
+      cfg.memory_width = 800;
+      cfg.memory_height = 480;
+      cfg.panel_width = 800;
+      cfg.panel_height = 480;
+      cfg.offset_x = 0;
+      cfg.offset_y = 0;
+      _panel_instance.config(cfg);
+    }
+    _panel_instance.setBus(&_bus_instance);
+    setPanel(&_panel_instance);
+  }
+};
+
+static LGFX lcd;
+
+#define TOUCH_GT911
+#define TOUCH_GT911_SCL 20 // 20
+#define TOUCH_GT911_SDA 19 // 19
+#define TOUCH_GT911_INT -1 //-1
+#define TOUCH_GT911_RST -1 // 38
+#define TOUCH_GT911_ROTATION ROTATION_NORMAL
+#define TOUCH_MAP_X1 800 // 480
+#define TOUCH_MAP_X2 0
+#define TOUCH_MAP_Y1 480 // 272
+#define TOUCH_MAP_Y2 0
+
+int touch_last_x = 0, touch_last_y = 0;
+
+TAMC_GT911 ts = TAMC_GT911(TOUCH_GT911_SDA, TOUCH_GT911_SCL, TOUCH_GT911_INT, TOUCH_GT911_RST, max(TOUCH_MAP_X1, TOUCH_MAP_X2), max(TOUCH_MAP_Y1, TOUCH_MAP_Y2));
+uint16_t touchX,
+    touchY;
+
+void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data)
 {
-  lv_event_code_t code = lv_event_get_code(e);
-  lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-  if (code == LV_EVENT_VALUE_CHANGED)
+  ts.read();
+  if (ts.isTouched)
   {
-    LV_UNUSED(obj);
-    LV_LOG_USER("Toggled %s", lv_obj_has_state(obj, LV_STATE_CHECKED) ? "on" : "off");
+
+    touch_last_x = map(ts.points[0].x, TOUCH_MAP_X1, TOUCH_MAP_X2, 0, lcd.width() - 1);
+    touch_last_y = map(ts.points[0].y, TOUCH_MAP_Y1, TOUCH_MAP_Y2, 0, lcd.height() - 1);
+    data->state = LV_INDEV_STATE_PR;
+
+    /*Set the coordinates*/
+    data->point.x = touch_last_x;
+    data->point.y = touch_last_y;
+  }
+  else
+  {
+    data->state = LV_INDEV_STATE_REL;
   }
 }
 
-static lv_obj_t *slider_label;
-// Callback that prints the current slider value on the TFT display and Serial Monitor for debugging purposes
-static void slider_event_callback(lv_event_t *e)
+void my_log_cb(lv_log_level_t level, const char *buf)
 {
-  lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
-  char buf[8];
-  lv_snprintf(buf, sizeof(buf), "%d%%", (int)lv_slider_get_value(slider));
-  lv_label_set_text(slider_label, buf);
-  lv_obj_align_to(slider_label, slider, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-  LV_LOG_USER("Slider changed to %d%%", (int)lv_slider_get_value(slider));
-}
-
-void lv_create_main_gui(void)
-{
-  // Create a text label aligned center on top ("Hello, world!")
-  lv_obj_t *text_label = lv_label_create(lv_screen_active());
-  lv_label_set_long_mode(text_label, LV_LABEL_LONG_WRAP); // Breaks the long lines
-  lv_label_set_text(text_label, "Hello, world!");
-  lv_obj_set_width(text_label, 150); // Set smaller width to make the lines wrap
-  lv_obj_set_style_text_align(text_label, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(text_label, LV_ALIGN_CENTER, 0, -90);
-
-  lv_obj_t *btn_label;
-  // Create a Button (btn1)
-  lv_obj_t *btn1 = lv_button_create(lv_screen_active());
-  lv_obj_add_event_cb(btn1, event_handler_btn1, LV_EVENT_ALL, NULL);
-  lv_obj_align(btn1, LV_ALIGN_CENTER, 0, -50);
-  lv_obj_remove_flag(btn1, LV_OBJ_FLAG_PRESS_LOCK);
-
-  btn_label = lv_label_create(btn1);
-  lv_label_set_text(btn_label, "Button");
-  lv_obj_center(btn_label);
-
-  // Create a Toggle button (btn2)
-  lv_obj_t *btn2 = lv_button_create(lv_screen_active());
-  lv_obj_add_event_cb(btn2, event_handler_btn2, LV_EVENT_ALL, NULL);
-  lv_obj_align(btn2, LV_ALIGN_CENTER, 0, 10);
-  lv_obj_add_flag(btn2, LV_OBJ_FLAG_CHECKABLE);
-  lv_obj_set_height(btn2, LV_SIZE_CONTENT);
-
-  btn_label = lv_label_create(btn2);
-  lv_label_set_text(btn_label, "Toggle");
-  lv_obj_center(btn_label);
-
-  // Create a slider aligned in the center bottom of the TFT display
-  lv_obj_t *slider = lv_slider_create(lv_screen_active());
-  lv_obj_align(slider, LV_ALIGN_CENTER, 0, 60);
-  lv_obj_add_event_cb(slider, slider_event_callback, LV_EVENT_VALUE_CHANGED, NULL);
-  lv_slider_set_range(slider, 0, 100);
-  lv_obj_set_style_anim_duration(slider, 2000, 0);
-
-  // Create a label below the slider to display the current slider value
-  slider_label = lv_label_create(lv_screen_active());
-  lv_label_set_text(slider_label, "0%");
-  lv_obj_align_to(slider_label, slider, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+  Serial.println(buf);
 }
 
 void setup()
 {
-  String LVGL_Arduino = "Hello Arduino! ";
-  LVGL_Arduino += String('V') + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
+  Serial.begin(115200); /*serial init */
+  Serial.println("Starting terraPen controller");
+  Wire.begin(TOUCH_GT911_SDA, TOUCH_GT911_SCL);
 
-  Serial.begin(115200);
-  Serial.println(LVGL_Arduino);
+  TPConfiguration config;
+  config.readConfig();
 
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  ArduinoOTA
+      .onStart([]()
+               {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH) {
+        type = "sketch";
+      } else {  // U_SPIFFS
+        type = "filesystem";
+      }
+
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type); })
+      .onEnd([]()
+             { Serial.println("\nEnd"); })
+      .onProgress([](unsigned int progress, unsigned int total)
+                  { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); })
+      .onError([](ota_error_t error)
+               {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) {
+        Serial.println("Auth Failed");
+      } else if (error == OTA_BEGIN_ERROR) {
+        Serial.println("Begin Failed");
+      } else if (error == OTA_CONNECT_ERROR) {
+        Serial.println("Connect Failed");
+      } else if (error == OTA_RECEIVE_ERROR) {
+        Serial.println("Receive Failed");
+      } else if (error == OTA_END_ERROR) {
+        Serial.println("End Failed");
+      } });
+
+  ArduinoOTA.begin();
+  Serial.println("Starting terraPen screen");
+  lcd.begin();
+
+  ts.begin();
+  ts.setRotation(TOUCH_GT911_ROTATION);
+
+  lv_log_register_print_cb(my_log_cb);
+
+  // lvgl init
   lv_init();
 
-  /*Set a tick source so that LVGL will know how much time elapsed. */
-  lv_tick_set_cb(convert_millis_to_tick);
+  lvBuffer = (uint8_t *)heap_caps_malloc(lvBufferSize, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
 
-  lv_display_t *disp;
+  static auto *lvDisplay = lv_display_create(screenWidth, screenHeight);
 
-  Serial.println("Setting up TFT_eSPI driver");
-  disp = lv_tft_espi_create(TFT_WIDTH, TFT_HEIGHT, draw_buf, sizeof(draw_buf));
-  lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90); // Rotate display
+  lv_display_set_color_format(lvDisplay, LV_COLOR_FORMAT_RGB565);
+  lv_display_set_flush_cb(lvDisplay, [](lv_display_t *display, const lv_area_t *area, unsigned char *data)
+                          {
+    uint32_t w = lv_area_get_width(area);
+    uint32_t h = lv_area_get_height(area);
+    lv_draw_sw_rgb565_swap(data, w * h);
+    lcd.pushImage(area->x1, area->y1, w, h, (uint16_t *)data);
+    lv_display_flush_ready(display); });
 
-  /*Initialize the (dummy) input device driver*/
-  lv_indev_t *indev = lv_indev_create();
-  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
+  lv_display_set_buffers(lvDisplay, lvBuffer, nullptr, lvBufferSize, LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+  static lv_indev_t *indev = lv_indev_create();
+  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, my_touchpad_read);
 
+  terrapen_setup();
+
+#ifdef TFT_BL
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+#endif
+
   Serial.println("Setup done");
-  lv_create_main_gui();
 }
 
 void loop()
 {
-  lv_task_handler(); /* let the GUI do its work */
-  delay(5);          /* let this time pass */
+  unsigned tickPeriod = millis() - lastTickMillis;
+  lv_tick_inc(tickPeriod);
+  lastTickMillis = millis();
+  lv_timer_handler();
+  delay(5);
 }
